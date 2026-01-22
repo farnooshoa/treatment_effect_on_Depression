@@ -1,0 +1,9 @@
+lambda_rep: 1.0
+lambda_y: 1.0
+lambda_ite: 1.0
+lambda_diff: 1.0
+lambda_ac: 0.001
+
+alpha_prop: 1.0
+beta_bal: 0.1
+
