@@ -7,7 +7,8 @@ from model import (
     CategoricalEmbeddingBlock,
     Encoder,
     OutcomeModel,
-    PropensityHead
+    PropensityHead,
+    ITEHead
 )
 from data_prepare import (
     NUMERIC_COLS,
@@ -273,6 +274,44 @@ def train_nuisance_on_fold(fold_train, fold_eval, category_sizes, num_treatments
         mu_hat = torch.stack(mu_hat, dim=1)
 
     return mu_hat, p_hat
+def add_diffusion_noise(C, sigma=0.1):
+    noise = torch.randn_like(C)
+    C_noisy = C + sigma * noise
+    return C_noisy, noise
+
+
+from diffusion import DiffusionDenoiser
+
+def compute_diffusion_loss(train_df, category_sizes, num_treatments):
+    x_num, x_cat, t, _ = build_model_inputs(train_df)
+
+    emb = CategoricalEmbeddingBlock(category_sizes)
+    encoder = Encoder(input_dim=6 + 8 * len(category_sizes))
+    denoiser = DiffusionDenoiser(dc=64, ds=64, num_treatments=num_treatments)
+
+    x_cat_emb = emb(x_cat)
+    x = torch.cat([x_num, x_cat_emb], dim=1)
+
+    S, C = encoder(x)
+
+    # sample diffusion step
+    step = torch.randint(0, 1000, (C.shape[0],))
+
+    C_noisy, noise = add_diffusion_noise(C)
+
+    noise_pred = denoiser(C_noisy, S, t, step)
+
+    loss = F.mse_loss(noise_pred, noise)
+    return loss
+
+lambda_y = 1.0
+lambda_ite = 1.0
+lambda_diff = 1.0
+lambda_rep = 1.0
+lambda_ac = 0.001
+
+alpha_prop = 1.0
+beta_bal = 0.1
 
 
 
@@ -309,9 +348,69 @@ if __name__ == "__main__":
     x_num_B, x_cat_B, t_B, y_B = build_model_inputs(foldB)
 
     tau_B = dr_pseudo_outcome(mu_hat_B, p_hat_B, t_B, y_B)
+    # Train nuisance on Fold B, evaluate on Fold A
+    mu_hat_A, p_hat_A = train_nuisance_on_fold(foldB, foldA, category_sizes, num_treatments)
 
-    print("tau_B shape:", tau_B.shape)
-    print("tau_B sample (first row):", tau_B[0])
+    # Build tensors for Fold A
+    x_num_A, x_cat_A, t_A, y_A = build_model_inputs(foldA)
+
+    tau_A = dr_pseudo_outcome(mu_hat_A, p_hat_A, t_A, y_A)
+
+    tau_all = torch.cat([tau_A, tau_B], dim=0)
+
+    # Build representations for the full training set
+    x_num_all, x_cat_all, _, _ = build_model_inputs(train_df)
+
+    emb = CategoricalEmbeddingBlock(category_sizes)
+    encoder = Encoder(input_dim=6 + 8 * len(category_sizes))
+    ite_head = ITEHead(ds=64, dc=64, num_treatments=num_treatments)
+
+    x_cat_emb_all = emb(x_cat_all)
+    x_all = torch.cat([x_num_all, x_cat_emb_all], dim=1)
+
+    S_all, C_all = encoder(x_all)
+
+    ite_pred = ite_head(S_all, C_all)
+
+    loss_ite = F.mse_loss(ite_pred, tau_all)
+    diff_loss = compute_diffusion_loss(train_df, category_sizes, num_treatments)
+    # compute losses
+    loss_y = compute_factual_loss(train_df, category_sizes, num_treatments)
+    print("Factual outcome loss L_y:", loss_y.item())
+
+    stab_loss = compute_stability_loss(train_df, category_sizes)
+    print("Stability loss L_stab:", stab_loss.item())
+
+    prop_loss = compute_propensity_loss(train_df, category_sizes, num_treatments)
+    print("Propensity loss L_prop:", prop_loss.item())
+
+    bal_loss = compute_balance_loss(train_df, category_sizes)
+    print("Balance loss L_bal:", bal_loss.item())
+
+    ac_loss = compute_anticollapse_loss(train_df, category_sizes)
+    print("Anti-collapse loss L_ac:", ac_loss.item())
+
+    
+    print("ITE loss L_ite:", loss_ite.item())
+
+    diff_loss = compute_diffusion_loss(train_df, category_sizes, num_treatments)
+    print("Diffusion loss L_diff:", diff_loss.item())
+    total_loss = (
+    lambda_y * loss_y
+    + lambda_ite * loss_ite
+    + lambda_diff * diff_loss
+    + lambda_rep * (stab_loss + alpha_prop * prop_loss + beta_bal * bal_loss)
+    + lambda_ac * ac_loss
+)
+
+    print("Total loss:", total_loss.item())
+
+
+
+
+
+
+    
 
     
  
