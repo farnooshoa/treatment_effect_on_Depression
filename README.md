@@ -1,4 +1,4 @@
-# Treatment Effect on Depression — Causal Representation Learning + DR ITE Supervision + Conditional Diffusion
+# Treatment Effect on Depression | Causal Representation Learning + DR ITE Supervision + Conditional Diffusion
 
 This repo implements the **applicant-facing methodology** for estimating treatment effects on next-visit depression severity using a simulated visit-transition dataset (`data_generated.csv`).
 
