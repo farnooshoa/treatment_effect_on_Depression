@@ -180,4 +180,3 @@ if __name__ == "__main__":
 
     C_denoised = denoiser(C_noisy, S, t, step)
     print("Denoised C shape:", C_denoised.shape)
-

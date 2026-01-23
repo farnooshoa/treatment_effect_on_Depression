@@ -140,6 +140,22 @@ def build_model_inputs(df):
     t     = torch.tensor(df["t_id"].values, dtype=torch.long)
     y     = torch.tensor(df["y"].values, dtype=torch.float32)
     return x_num, x_cat, t, y
+   
+
+def patient_level_two_folds(df, patient_col="UNIQUEID", seed=42):
+    patients = df[patient_col].unique()
+    rng = np.random.default_rng(seed)
+    rng.shuffle(patients)
+
+    mid = len(patients) // 2
+    foldA_patients = set(patients[:mid])
+    foldB_patients = set(patients[mid:])
+
+    foldA = df[df[patient_col].isin(foldA_patients)].copy()
+    foldB = df[df[patient_col].isin(foldB_patients)].copy()
+    return foldA, foldB
+ 
+    
 
 if __name__ == "__main__":
 
@@ -170,11 +186,17 @@ if __name__ == "__main__":
     # 5. Build model inputs 
     x_num, x_cat, t, y = build_model_inputs(train_df)
     category_sizes = get_category_sizes(cat_encoders, CATEGORICAL_COLS)
-    print("Category sizes:", category_sizes)
+    foldA, foldB = patient_level_two_folds(train_df)
 
 
-    print("x_num shape:", x_num.shape)
-    print("x_cat shape:", x_cat.shape)
-    print("t shape    :", t.shape)
-    print("y shape    :", y.shape)
+    mu_hat_B, p_hat_B = train_nuisance_on_fold(foldA, foldB, category_sizes, num_treatments)
 
+    print("mu_hat_B shape:", mu_hat_B.shape)
+    print("p_hat_B shape:", p_hat_B.shape)
+
+    
+
+
+
+
+  
