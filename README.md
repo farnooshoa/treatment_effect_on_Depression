@@ -33,3 +33,13 @@ Each row represents a **transition from visit v → visit v+1**:
 
 ## Repository Structure (suggested)
 
+treatment_effect_on_Depression/
+├─ data/
+│ └─ data_generated.csv
+├─ src/
+│ ├─ data_prepare.py # load, outcome creation, splitting, preprocessing, tensor building
+│ ├─ model.py # encoder, propensity head, outcome model, ITE head, embeddings
+│ ├─ nuisance.py # nuisance propensity + outcome models for DR cross-fitting
+│ ├─ diffusion.py # diffusion denoiser network
+│ └─ train_step.py # computes all losses + total objective (single forward run)
+└─ README.md
