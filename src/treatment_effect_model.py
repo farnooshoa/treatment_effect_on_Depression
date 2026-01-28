@@ -119,7 +119,7 @@ class DepressionDataset(Dataset):
             fit_scaler: Whether to fit the scaler on this data
             treatment_map: Mapping from treatment strings to indices
         """
-        self.data = data.reset_index(drop=True)
+        self.data = data.reset_index(drop=True).copy()
         
         # Define feature columns
         self.numeric_features = ['AGE']
@@ -127,17 +127,33 @@ class DepressionDataset(Dataset):
                                      'GENDER', 'GEOCODE', 'THERPHAS']
         self.hamd_items = [f'HAMD{i:02d}' for i in range(1, 18)]
         
+        # Clean numeric features - convert to float, handle missing
+        for col in self.numeric_features:
+            self.data[col] = pd.to_numeric(self.data[col], errors='coerce')
+        
+        # Clean HAMD items - convert to numeric
+        for col in self.hamd_items:
+            if col in self.data.columns:
+                self.data[col] = pd.to_numeric(self.data[col], errors='coerce').fillna(0)
+        
         # Compute outcome (next-visit HAMD total score)
-        self.data['outcome'] = self.data[self.hamd_items].sum(axis=1)
+        available_hamd = [col for col in self.hamd_items if col in self.data.columns]
+        self.data['outcome'] = self.data[available_hamd].sum(axis=1)
         
         # Process treatment
         if treatment_map is None:
+            # Remove any NaN treatments
+            self.data = self.data[self.data['THERAPY'].notna()].copy()
             unique_treatments = sorted(self.data['THERAPY'].unique())
             self.treatment_map = {t: i for i, t in enumerate(unique_treatments)}
         else:
             self.treatment_map = treatment_map
         
         self.data['treatment_idx'] = self.data['THERAPY'].map(self.treatment_map)
+        # Remove any rows where treatment mapping failed
+        self.data = self.data[self.data['treatment_idx'].notna()].copy()
+        self.data['treatment_idx'] = self.data['treatment_idx'].astype(int)
+        
         self.n_treatments = len(self.treatment_map)
         
         # Standardize numeric features
@@ -160,9 +176,19 @@ class DepressionDataset(Dataset):
         # Process categorical features (map to indices)
         self.cat_mappings = {}
         for col in self.categorical_features:
-            unique_vals = ['UNKNOWN'] + sorted([str(v) for v in self.data[col].unique() if pd.notna(v)])
+            # Convert to string and handle missing
+            self.data[col] = self.data[col].fillna('UNKNOWN').astype(str)
+            unique_vals = ['UNKNOWN'] + sorted([str(v) for v in self.data[col].unique() if str(v) != 'UNKNOWN'])
             self.cat_mappings[col] = {v: i for i, v in enumerate(unique_vals)}
-            self.data[col] = self.data[col].fillna('UNKNOWN').astype(str).map(self.cat_mappings[col])
+            self.data[col] = self.data[col].map(self.cat_mappings[col])
+            # Fill any unmapped values with 0 (UNKNOWN)
+            self.data[col] = self.data[col].fillna(0).astype(int)
+        
+        # Final cleanup - remove any rows with NaN in critical columns
+        critical_cols = self.numeric_features + self.categorical_features + ['treatment_idx', 'outcome']
+        self.data = self.data.dropna(subset=critical_cols).reset_index(drop=True)
+        
+        print(f"Dataset created with {len(self.data)} samples")
         
     def __len__(self):
         return len(self.data)
@@ -170,15 +196,19 @@ class DepressionDataset(Dataset):
     def __getitem__(self, idx):
         row = self.data.iloc[idx]
         
-        # Numeric features
-        numeric = torch.tensor(row[self.numeric_features].values, dtype=torch.float32)
+        # Numeric features - ensure they're actually numeric
+        numeric_values = row[self.numeric_features].values
+        # Convert to float, replacing any non-numeric with 0
+        numeric_values = pd.to_numeric(numeric_values, errors='coerce').astype(np.float32)
+        numeric_values = np.nan_to_num(numeric_values, nan=0.0)
+        numeric = torch.from_numpy(numeric_values)
         
         # Categorical features (as indices)
-        categorical = torch.tensor([row[col] for col in self.categorical_features], dtype=torch.long)
+        categorical = torch.tensor([int(row[col]) for col in self.categorical_features], dtype=torch.long)
         
-        # Treatment and outcome
-        treatment = torch.tensor(row['treatment_idx'], dtype=torch.long)
-        outcome = torch.tensor(row['outcome'], dtype=torch.float32)
+        # Treatment and outcome - ensure they're numeric
+        treatment = torch.tensor(int(row['treatment_idx']), dtype=torch.long)
+        outcome = torch.tensor(float(row['outcome']), dtype=torch.float32)
         
         return {
             'numeric': numeric,
@@ -556,75 +586,175 @@ def compute_outcome_loss(predictions, targets):
 # SECTION 6: DOUBLY ROBUST ESTIMATOR FOR ITE
 # =============================================================================
 
-def compute_doubly_robust_pseudo_outcomes(
-    outcome_model, encoder, data_loader, n_treatments, baseline_treatment,
-    device, clip_min=0.01, clip_max=0.99, winsorize_quantiles=(0.05, 0.95)
+def compute_doubly_robust_pseudo_outcomes_with_crossfitting(
+    train_dataset, cat_embeddings, n_treatments, baseline_treatment,
+    device, stable_dim=128, confound_dim=128, clip_min=0.01, clip_max=0.99, 
+    winsorize_quantiles=(0.05, 0.95), n_folds=2, n_epochs=50
 ):
     """
-    Compute doubly robust pseudo-outcomes using cross-fitting
+    Compute doubly robust pseudo-outcomes using proper 2-fold cross-fitting
+    
+    This implements the full cross-fitting procedure:
+    1. Split training data into 2 folds
+    2. Train models on fold 1, compute pseudo-outcomes on fold 2
+    3. Train models on fold 2, compute pseudo-outcomes on fold 1
+    4. Combine both sets of pseudo-outcomes
     
     Args:
-        outcome_model: Trained outcome model
-        encoder: Trained encoder
-        data_loader: DataLoader with data
+        train_dataset: Training dataset
+        cat_embeddings: Categorical embedding layer
         n_treatments: Number of treatments
         baseline_treatment: Index of baseline treatment
         device: torch device
+        stable_dim: Dimension of stable representation
+        confound_dim: Dimension of confounding representation
         clip_min, clip_max: Propensity score clipping bounds
         winsorize_quantiles: Quantiles for winsorization
+        n_folds: Number of folds (2 as specified)
+        n_epochs: Epochs to train each fold model
     
     Returns:
-        pseudo_outcomes: (n_samples, n_treatments) array of pseudo-outcomes
+        pseudo_outcomes: (n_samples, n_treatments) tensor of pseudo-outcomes
     """
-    encoder.eval()
-    outcome_model.eval()
+    from sklearn.model_selection import KFold
+    import copy
     
-    all_pseudo_outcomes = []
+    n_samples = len(train_dataset)
+    all_pseudo_outcomes = torch.zeros(n_samples, n_treatments)
     
-    with torch.no_grad():
-        for batch in data_loader:
-            numeric = batch['numeric'].to(device)
-            categorical = batch['categorical'].to(device)
-            treatment = batch['treatment'].to(device)
-            outcome = batch['outcome'].to(device)
+    # Get input dimension
+    sample = train_dataset[0]
+    numeric_dim = sample['numeric'].shape[0]
+    categorical_dim = len(sample['categorical']) * 8  # embedding_dim = 8
+    input_dim = numeric_dim + categorical_dim
+    
+    # Create fold indices
+    indices = np.arange(n_samples)
+    kfold = KFold(n_splits=n_folds, shuffle=True, random_state=42)
+    
+    print(f"\n  Computing DR pseudo-outcomes with {n_folds}-fold cross-fitting...")
+    
+    for fold_idx, (train_idx, val_idx) in enumerate(kfold.split(indices)):
+        print(f"  Fold {fold_idx + 1}/{n_folds}: Training on {len(train_idx)} samples, computing on {len(val_idx)} samples")
+        
+        # Create fold-specific data loaders
+        train_subset = torch.utils.data.Subset(train_dataset, train_idx)
+        val_subset = torch.utils.data.Subset(train_dataset, val_idx)
+        
+        train_loader_fold = DataLoader(train_subset, batch_size=128, shuffle=True)
+        val_loader_fold = DataLoader(val_subset, batch_size=128, shuffle=False)
+        
+        # Initialize fold-specific models
+        encoder_fold = RepresentationEncoder(input_dim, stable_dim, confound_dim).to(device)
+        propensity_head_fold = PropensityHead(confound_dim, n_treatments).to(device)
+        outcome_model_fold = OutcomeModel(stable_dim, confound_dim, n_treatments).to(device)
+        
+        # Train models on this fold
+        params = list(encoder_fold.parameters()) + \
+                 list(propensity_head_fold.parameters()) + \
+                 list(outcome_model_fold.parameters())
+        optimizer = torch.optim.Adam(params, lr=1e-3, weight_decay=1e-5)
+        
+        # Quick training (reduced epochs for cross-fitting)
+        for epoch in range(n_epochs):
+            encoder_fold.train()
+            propensity_head_fold.train()
+            outcome_model_fold.train()
             
-            # Get representations
-            x = torch.cat([numeric, categorical.float()], dim=1)  # Simplified for pseudo-outcome
-            S, C = encoder(x)
-            
-            # Compute propensity scores (simplified - using uniform for baseline)
-            propensity = torch.ones(len(treatment), n_treatments).to(device) / n_treatments
-            propensity = torch.clamp(propensity, clip_min, clip_max)
-            
-            # Compute pseudo-outcomes for each treatment
-            pseudo_batch = []
-            for t in range(n_treatments):
-                # Predict outcome under treatment t
-                t_tensor = torch.full_like(treatment, t)
-                y_pred_t = outcome_model(S, C, t_tensor).squeeze()
+            epoch_loss = 0
+            for batch in train_loader_fold:
+                numeric = batch['numeric'].to(device)
+                categorical = batch['categorical'].to(device)
+                treatment = batch['treatment'].to(device)
+                outcome = batch['outcome'].to(device)
                 
-                # Predict outcome under baseline
-                baseline_tensor = torch.full_like(treatment, baseline_treatment)
-                y_pred_baseline = outcome_model(S, C, baseline_tensor).squeeze()
+                # Embed and encode
+                cat_emb = cat_embeddings(categorical)
+                x = torch.cat([numeric, cat_emb], dim=1)
+                S, C = encoder_fold(x)
                 
-                # Doubly robust estimator
-                indicator = (treatment == t).float()
-                ipw_term = (indicator / propensity[torch.arange(len(treatment)), t]) * \
-                           (outcome - y_pred_t)
+                # Propensity loss
+                propensity_logits = propensity_head_fold(C)
+                loss_prop = F.cross_entropy(propensity_logits, treatment)
                 
-                tau_dr = ipw_term + y_pred_t - y_pred_baseline
-                pseudo_batch.append(tau_dr.unsqueeze(1))
-            
-            pseudo_batch = torch.cat(pseudo_batch, dim=1)
-            all_pseudo_outcomes.append(pseudo_batch.cpu())
+                # Outcome loss
+                y_pred = outcome_model_fold(S, C, treatment)
+                loss_outcome = F.mse_loss(y_pred.squeeze(), outcome)
+                
+                # Combined loss for cross-fitting
+                loss = loss_prop + loss_outcome
+                
+                optimizer.zero_grad()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(params, 1.0)
+                optimizer.step()
+                
+                epoch_loss += loss.item()
+        
+        # Compute pseudo-outcomes on validation fold
+        encoder_fold.eval()
+        propensity_head_fold.eval()
+        outcome_model_fold.eval()
+        
+        fold_pseudo_outcomes = []
+        fold_indices = []
+        
+        with torch.no_grad():
+            for batch_idx, batch in enumerate(val_loader_fold):
+                numeric = batch['numeric'].to(device)
+                categorical = batch['categorical'].to(device)
+                treatment = batch['treatment'].to(device)
+                outcome = batch['outcome'].to(device)
+                
+                # Get representations
+                cat_emb = cat_embeddings(categorical)
+                x = torch.cat([numeric, cat_emb], dim=1)
+                S, C = encoder_fold(x)
+                
+                # Compute propensity scores
+                propensity_logits = propensity_head_fold(C)
+                propensity = F.softmax(propensity_logits, dim=1)
+                propensity = torch.clamp(propensity, clip_min, clip_max)
+                
+                # Compute pseudo-outcomes for each treatment
+                pseudo_batch = []
+                for t in range(n_treatments):
+                    # Predict outcome under treatment t
+                    t_tensor = torch.full_like(treatment, t)
+                    y_pred_t = outcome_model_fold(S, C, t_tensor).squeeze()
+                    
+                    # Predict outcome under baseline
+                    baseline_tensor = torch.full_like(treatment, baseline_treatment)
+                    y_pred_baseline = outcome_model_fold(S, C, baseline_tensor).squeeze()
+                    
+                    # Doubly robust estimator
+                    indicator = (treatment == t).float()
+                    ipw_term = (indicator / propensity[torch.arange(len(treatment)), t]) * \
+                               (outcome - y_pred_t)
+                    
+                    tau_dr = ipw_term + y_pred_t - y_pred_baseline
+                    pseudo_batch.append(tau_dr.unsqueeze(1))
+                
+                pseudo_batch = torch.cat(pseudo_batch, dim=1)
+                fold_pseudo_outcomes.append(pseudo_batch.cpu())
+                
+                # Track which samples these correspond to
+                start_idx = batch_idx * 128
+                end_idx = start_idx + len(numeric)
+                fold_indices.extend(val_idx[start_idx:end_idx])
+        
+        # Store pseudo-outcomes for this fold
+        fold_pseudo_outcomes = torch.cat(fold_pseudo_outcomes, dim=0)
+        for i, orig_idx in enumerate(fold_indices):
+            all_pseudo_outcomes[orig_idx] = fold_pseudo_outcomes[i]
     
-    all_pseudo_outcomes = torch.cat(all_pseudo_outcomes, dim=0)
-    
-    # Winsorization
+    # Winsorization across all pseudo-outcomes
     if winsorize_quantiles is not None:
         low_q = torch.quantile(all_pseudo_outcomes, winsorize_quantiles[0])
         high_q = torch.quantile(all_pseudo_outcomes, winsorize_quantiles[1])
         all_pseudo_outcomes = torch.clamp(all_pseudo_outcomes, low_q, high_q)
+    
+    print(f"  ✓ Cross-fitting complete. Pseudo-outcomes computed for all {n_samples} samples.\n")
     
     return all_pseudo_outcomes
 
@@ -943,6 +1073,7 @@ class TreatmentEffectModel:
                             n_epochs=100, lr=1e-3, patience=15):
         """
         Stage 2: Train outcome model and ITE head (encoder frozen)
+        Uses proper 2-fold cross-fitting for doubly robust pseudo-outcomes
         """
         print("\n" + "="*80)
         print("STAGE 2: Outcome and ITE Prediction")
@@ -951,6 +1082,28 @@ class TreatmentEffectModel:
         # Freeze encoder
         for param in self.encoder.parameters():
             param.requires_grad = False
+        
+        # Compute pseudo-outcomes with proper 2-fold cross-fitting
+        print("\nComputing doubly robust pseudo-outcomes with 2-fold cross-fitting...")
+        train_dataset = train_loader.dataset
+        
+        pseudo_outcomes = compute_doubly_robust_pseudo_outcomes_with_crossfitting(
+            train_dataset=train_dataset,
+            cat_embeddings=cat_embeddings,
+            n_treatments=self.n_treatments,
+            baseline_treatment=self.baseline_treatment,
+            device=self.device,
+            stable_dim=self.stable_dim,
+            confound_dim=self.confound_dim,
+            clip_min=0.01,
+            clip_max=0.99,
+            winsorize_quantiles=(0.05, 0.95),
+            n_folds=2,
+            n_epochs=30  # Quick training for cross-fitting models
+        )
+        
+        # Convert to device
+        pseudo_outcomes = pseudo_outcomes.to(self.device)
         
         # Optimizer for outcome model and ITE head
         params = list(self.outcome_model.parameters()) + list(self.ite_head.parameters())
@@ -970,11 +1123,14 @@ class TreatmentEffectModel:
             
             epoch_losses = {'total': 0, 'outcome': 0, 'ite': 0}
             
+            sample_idx = 0
             for batch in train_loader:
                 numeric = batch['numeric'].to(self.device)
                 categorical = batch['categorical'].to(self.device)
                 treatment = batch['treatment'].to(self.device)
                 outcome = batch['outcome'].to(self.device)
+                
+                batch_size = len(numeric)
                 
                 # Get representations (no gradient through encoder)
                 cat_emb = cat_embeddings(categorical)
@@ -987,11 +1143,12 @@ class TreatmentEffectModel:
                 y_pred = self.outcome_model(S, C, treatment)
                 loss_outcome = compute_outcome_loss(y_pred, outcome)
                 
-                # ITE prediction (using simplified pseudo-outcomes for now)
-                # In full implementation, would use doubly robust estimator with cross-fitting
+                # ITE prediction using cross-fitted pseudo-outcomes
                 ite_pred = self.ite_head(S, C)
-                # Simplified: use observed outcomes as proxy
-                loss_ite = F.mse_loss(ite_pred[:, treatment], outcome - outcome.mean())
+                pseudo_batch = pseudo_outcomes[sample_idx:sample_idx + batch_size]
+                loss_ite = F.mse_loss(ite_pred, pseudo_batch)
+                
+                sample_idx += batch_size
                 
                 # Total loss
                 loss = lambda_outcome * loss_outcome + lambda_ite * loss_ite
@@ -1280,8 +1437,35 @@ def main():
     print("="*80)
     print("\nLoading and preprocessing data...")
     
-    # Load data
-    filepath = '/mnt/user-data/uploads/data_generated.csv'
+    # Load data - try multiple possible locations
+    import os
+    possible_paths = [
+        'data_generated.csv',  # Same directory as script
+        '../data/data_generated.csv',  # Parent's data folder
+        'data/data_generated.csv',  # Local data folder
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'data', 'data_generated.csv'),
+        '/mnt/user-data/uploads/data_generated.csv',  # Original path (for Linux/cloud)
+    ]
+    
+    filepath = None
+    for path in possible_paths:
+        if os.path.exists(path):
+            filepath = os.path.abspath(path)
+            print(f"✓ Found data file: {filepath}\n")
+            break
+    
+    if filepath is None:
+        print("\n" + "="*80)
+        print("ERROR: Could not find data_generated.csv")
+        print("="*80)
+        print("\nPlease place data_generated.csv in one of these locations:")
+        print("  1. Same directory as treatment_effect_model.py")
+        print("  2. ../data/ folder (relative to script)")
+        print("  3. data/ subfolder")
+        print("\nOr edit the filepath variable in the main() function.")
+        print("="*80)
+        raise FileNotFoundError("data_generated.csv not found in any expected location")
+    
     train_df, val_df, test_df = load_and_split_data(filepath)
     
     # Create datasets
@@ -1349,10 +1533,32 @@ def main():
     # Evaluation
     results = evaluate_model(model, test_loader, cat_embeddings, device)
     
+    # Save results to current directory or results folder
+    import os
+    
+    # Try to create/use results directory, fallback to current directory
+    output_dir = None
+    possible_dirs = ['results', '../results', '.']
+    
+    for dir_path in possible_dirs:
+        try:
+            if dir_path != '.' and not os.path.exists(dir_path):
+                os.makedirs(dir_path, exist_ok=True)
+            output_dir = dir_path
+            break
+        except:
+            continue
+    
+    if output_dir is None:
+        output_dir = '.'
+    
+    results_file = os.path.join(output_dir, 'baseline_results.csv')
+    model_file = os.path.join(output_dir, 'baseline_model.pt')
+    
     # Save results
     results_df = pd.DataFrame([results])
-    results_df.to_csv('/home/claude/baseline_results.csv', index=False)
-    print("\nResults saved to baseline_results.csv")
+    results_df.to_csv(results_file, index=False)
+    print(f"\nResults saved to {os.path.abspath(results_file)}")
     
     # Save model
     torch.save({
@@ -1365,8 +1571,8 @@ def main():
         'treatment_map': train_dataset.treatment_map,
         'scaler_mean': train_dataset.scaler.mean_,
         'scaler_scale': train_dataset.scaler.scale_,
-    }, '/home/claude/baseline_model.pt')
-    print("Model saved to baseline_model.pt")
+    }, model_file)
+    print(f"Model saved to {os.path.abspath(model_file)}")
     
     return model, results
 

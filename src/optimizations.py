@@ -155,29 +155,43 @@ def adversarial_balance_loss(encoder, discriminator, x, treatment, lambda_grad_p
     # Forward pass through encoder
     S, C = encoder(x)
     
+    # Clone C to avoid in-place operations
+    C_for_discriminator = C.clone()
+    
     # Discriminator prediction
-    treatment_pred = discriminator(C)
+    treatment_pred = discriminator(C_for_discriminator)
     
     # Adversarial loss for encoder (wants to confuse discriminator)
     encoder_loss = -F.cross_entropy(treatment_pred, treatment)
     
-    # Loss for discriminator (wants to predict treatment correctly)
-    discriminator_loss = F.cross_entropy(treatment_pred, treatment)
+    # Loss for discriminator (wants to predict treatment correctly) 
+    # Use detached C for discriminator training to avoid modifying encoder gradients
+    C_detached = C.detach().clone().requires_grad_(True)
+    treatment_pred_for_disc = discriminator(C_detached)
+    discriminator_loss = F.cross_entropy(treatment_pred_for_disc, treatment)
     
     # Gradient penalty for stability
-    alpha = torch.rand(C.shape[0], 1).to(C.device)
-    C_perturbed = (alpha * C + (1 - alpha) * torch.randn_like(C)).requires_grad_(True)
-    treatment_pred_perturbed = discriminator(C_perturbed)
+    alpha = torch.rand(C_detached.shape[0], 1, device=C_detached.device)
     
+    # Create interpolated samples
+    C_random = torch.randn_like(C_detached)
+    C_interpolated = (alpha * C_detached + (1 - alpha) * C_random).requires_grad_(True)
+    
+    treatment_pred_interpolated = discriminator(C_interpolated)
+    
+    # Compute gradients
     gradients = torch.autograd.grad(
-        outputs=treatment_pred_perturbed.sum(),
-        inputs=C_perturbed,
+        outputs=treatment_pred_interpolated.sum(),
+        inputs=C_interpolated,
         create_graph=True,
-        retain_graph=True
+        retain_graph=True,
+        only_inputs=True
     )[0]
     
     gradient_penalty = ((gradients.norm(2, dim=1) - 1) ** 2).mean()
-    discriminator_loss += lambda_grad_penalty * gradient_penalty
+    discriminator_loss = discriminator_loss + lambda_grad_penalty * gradient_penalty
+    
+    return encoder_loss, discriminator_loss
     
     return encoder_loss, discriminator_loss
 
@@ -604,14 +618,52 @@ def run_ablation_study(filepath, device='cpu'):
     
     # Save results
     results_df = pd.DataFrame(results).T
-    results_df.to_csv('/home/claude/ablation_results.csv')
-    print("\nAblation results saved to ablation_results.csv")
+    
+    import os
+    output_dir = None
+    possible_dirs = ['results', '../results', '.']
+    for dir_path in possible_dirs:
+        try:
+            if dir_path != '.' and not os.path.exists(dir_path):
+                os.makedirs(dir_path, exist_ok=True)
+            output_dir = dir_path
+            break
+        except:
+            continue
+    if output_dir is None:
+        output_dir = '.'
+    
+    results_file = os.path.join(output_dir, 'ablation_results.csv')
+    results_df.to_csv(results_file)
+    print(f"\nAblation results saved to {os.path.abspath(results_file)}")
     
     return results
 
 
 if __name__ == '__main__':
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    filepath = '/mnt/user-data/uploads/data_generated.csv'
+    
+    # Try multiple possible locations
+    import os
+    possible_paths = [
+        'data_generated.csv',
+        '../data/data_generated.csv',
+        'data/data_generated.csv',
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'data', 'data_generated.csv'),
+        '/mnt/user-data/uploads/data_generated.csv',
+    ]
+    
+    filepath = None
+    for path in possible_paths:
+        if os.path.exists(path):
+            filepath = os.path.abspath(path)
+            print(f"Found data file: {filepath}")
+            break
+    
+    if filepath is None:
+        raise FileNotFoundError(
+            "Could not find data_generated.csv. "
+            "Please place it in the same directory or in ../data/ folder"
+        )
     
     results = run_ablation_study(filepath, device=device)

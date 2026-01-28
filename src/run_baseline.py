@@ -42,7 +42,7 @@ def check_dependencies():
 
 def check_data_file():
     """Check if data file exists"""
-    data_path = '/mnt/user-data/uploads/data_generated.csv'
+    data_path = 'data\data_generated.csv'
     if os.path.exists(data_path):
         print(f"✓ Data file found: {data_path}\n")
         return True

@@ -1,0 +1,7 @@
+,factual_mse,factual_mae,factual_r2,factual_rmse,error
+Baseline,32.186195373535156,4.775845527648926,-0.08846282958984375,5.673287880368417,
+Attention,30.53601837158203,4.635529518127441,-0.032657504081726074,5.525940496565452,
+Contrastive,32.19579315185547,4.793791770935059,-0.08878731727600098,5.674133691750263,
+Adversarial,,,,,"one of the variables needed for gradient computation has been modified by an inplace operation: [torch.FloatTensor [64, 6]], which is output 0 of AsStridedBackward0, is at version 2; expected version 1 instead. Hint: enable anomaly detection to find the operation that failed to compute its gradient, with torch.autograd.set_detect_anomaly(True)."
+Residual,31.171558380126953,4.7219343185424805,-0.05415010452270508,5.583149503651765,
+All_Optimizations,,,,,"one of the variables needed for gradient computation has been modified by an inplace operation: [torch.FloatTensor [64, 6]], which is output 0 of AsStridedBackward0, is at version 2; expected version 1 instead. Hint: enable anomaly detection to find the operation that failed to compute its gradient, with torch.autograd.set_detect_anomaly(True)."
