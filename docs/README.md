@@ -1,8 +1,5 @@
 # Treatment Effect Estimation with Causal Representation Learning
 
-**PhD Application Task - Dr. Lu Wang's Lab**  
-**Applicant**: Farnoosh Ostad
-**Date**: January 2026
 
 ---
 
