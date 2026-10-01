@@ -1,11 +1,7 @@
 # Executive Summary
 
-> Complete implementation of treatment effect estimation for PhD application task
+> Complete implementation of treatment effect estimation
 
-**Applicant:** Farnoosh  
-**Institution:** University of Houston, Biomedical Engineering  
-**Supervisor:** Dr. Lu Wang  
-**Date:** January 2026
 
 ---
 
