@@ -339,7 +339,6 @@ python optimizations.py
 
 ## Conclusion
 
-This implementation fully addresses all three requirements of the PhD application task:
 
 1. ✅ Complete mathematical derivation of training objective with 7 loss components
 2. ✅ Full baseline implementation with proper evaluation
@@ -353,8 +352,3 @@ The code demonstrates strong skills in:
 
 All requirements are met with rigorous attention to detail, proper documentation, and extensible design for future research.
 
----
-
-**Thank you for considering this application!**
-
-*For questions or clarifications, please contact Farnoosh*
