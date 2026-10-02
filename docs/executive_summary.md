@@ -230,8 +230,6 @@ Results saved to `ablation_results.csv` for detailed comparison.
 
 ## Demonstration of Required Skills
 
-This implementation demonstrates the following PhD-level skills:
-
 ### 1. Mathematical Rigor
 - ✓ Complete derivation of complex training objectives
 - ✓ Understanding of causal inference theory
