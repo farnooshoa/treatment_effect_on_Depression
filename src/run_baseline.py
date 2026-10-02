@@ -14,7 +14,6 @@ def print_header():
     """Print welcome header"""
     print("="*80)
     print(" "*20 + "TREATMENT EFFECT ESTIMATION")
-    print(" "*15 + "PhD Application Task - Dr. Lu Wang's Lab")
     print("="*80)
     print(f"\nStarted at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
 
