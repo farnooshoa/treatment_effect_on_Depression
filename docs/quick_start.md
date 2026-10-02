@@ -215,16 +215,6 @@ python -c "import torch; print(torch.cuda.is_available())"
 - **Full Documentation**: See `README.md`
 - **Theory**: See `docs/theoretical_foundations.md`
 - **Overview**: See `docs/executive_summary.md`
-
----
-
-## Citation
-
-PhD Application Task - Dr. Lu Wang's Lab  
-University of Houston, Biomedical Engineering  
-Applicant: Farnoosh  
-Date: January 2026
-
 ---
 
 **Ready to go? Run this:**
