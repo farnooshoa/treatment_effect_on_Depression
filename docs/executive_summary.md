@@ -6,9 +6,6 @@
 ---
 
 ## Overview
-
-This implementation addresses all three requirements of the PhD application task:
-
 ### ✅ Task 1: Training Objective Derivation
 - Complete mathematical derivation from methodological description
 - 7-component loss function with clear hyperparameters
