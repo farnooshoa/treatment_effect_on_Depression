@@ -1,7 +1,7 @@
 """
 Treatment Effect Estimation with Causal Representation Learning and Diffusion Models
 
-This implementation addresses the PhD application task for causal treatment effect estimation
+This implementation addresses task for causal treatment effect estimation
 on depression data using representation learning and conditional diffusion models.
 """
 
