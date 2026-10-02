@@ -568,7 +568,3 @@ L = -log(exp(sim(S₁, S₂)/τ) / Σₖ exp(sim(S₁, Sₖ)/τ))
 4. Hassanpour, N., & Greiner, R. (2020). "Learning Disentangled Representations for CounterFactual Regression." *ICLR*.
 
 5. Kennedy, E. H. (2020). "Towards optimal doubly robust estimation of heterogeneous causal effects." *arXiv*.
-
----
-
-*Document prepared for PhD application task - Dr. Lu Wang's Lab, University of Houston*
